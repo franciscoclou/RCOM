@@ -12,16 +12,28 @@
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 256
 
+// Definição dos bytes da trama segundo o Guião
+#define FLAG 0x7E
+#define A_TX 0x03 // Comandos do Emissor ou Respostas do Recetor
+#define A_RX 0x01 // Comandos do Recetor ou Respostas do Emissor
+#define C_SET 0x03
+#define C_UA 0x07
+
+// Enumeração para a Máquina de Estados
+typedef enum {
+    START,
+    FLAG_RCV,
+    A_RCV,
+    C_RCV,
+    BCC_OK,
+    STOP_STATE
+} State;
+
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and send a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -30,44 +42,64 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Create string to send
-    unsigned char buf[BUF_SIZE] = {0};
+    // 1. Construir e enviar a trama SET
+    unsigned char setFrame[5];
+    setFrame[0] = FLAG;
+    setFrame[1] = A_TX; // 0x03
+    setFrame[2] = C_SET; // 0x03
+    setFrame[3] = setFrame[1] ^ setFrame[2]; // BCC1
+    setFrame[4] = FLAG;
 
-    for (int i = 0; i < BUF_SIZE; i++)
+    int bytesWritten = writeBytesSerialPort(setFrame, 5);
+    printf("Transmissor: Enviou trama SET (%d bytes)\n", bytesWritten);
+
+    // 2. Ler a trama UA usando uma Máquina de Estados
+    State state = START;
+    unsigned char byte;
+    
+    printf("Transmissor: A aguardar trama UA...\n");
+    while (state != STOP_STATE)
     {
-        buf[i] = 'a' + i % 26;
+        if (readByteSerialPort(&byte) > 0)
+        {
+            switch (state)
+            {
+                case START:
+                    if (byte == FLAG) state = FLAG_RCV;
+                    break;
+                case FLAG_RCV:
+                    if (byte == A_TX) state = A_RCV; // Respostas do recetor usam A=0x03[cite: 2]
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case A_RCV:
+                    if (byte == C_UA) state = C_RCV;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case C_RCV:
+                    if (byte == (A_TX ^ C_UA)) state = BCC_OK;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case BCC_OK:
+                    if (byte == FLAG) state = STOP_STATE;
+                    else state = START;
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
-    // In non-canonical mode, '\n' does not end the writing.
-    // Test this condition by placing a '\n' in the middle of the buffer.
-    // The whole buffer must be sent even with the '\n'.
-    buf[5] = '\n';
+    printf("Transmissor: Trama UA recebida com sucesso! Ligacao estabelecida.\n");
 
-    int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-    printf("%d bytes written to serial port\n", bytes);
-
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
-
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
-        perror("closeSerialPort");
-        return -1;
-    }
-
-    printf("Serial port %s closed\n", llParameters.serialPort);
-
+    // NOTA: A porta série NÃO é fechada aqui. Fica aberta para o llSend().
     return 0;
 }
 
 int llOpenRx(LinkLayer llParameters)
 {
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and receive a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -76,44 +108,59 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Read from serial port until the 'z' char is received.
-
-    // NOTE: This while() cycle is a simple example showing how to read from the serial port.
-    // It must be changed in order to respect the specifications of the protocol indicated in the Lab guide.
-
-    // TODO: Save the received bytes in a buffer array and print it at the end of the program.
-    volatile int STOP = FALSE;
-    int nBytesBuf = 0;
-
-    while (STOP == FALSE)
+    // 1. Ler a trama SET usando uma Máquina de Estados
+    State state = START;
+    unsigned char byte;
+    
+    printf("Recetor: A aguardar trama SET...\n");
+    while (state != STOP_STATE)
     {
-        // Read one byte from serial port.
-        // NOTE: You must check how many bytes were actually read by reading the return value.
-        // In this example, we assume that the byte is always read, which may not be true.
-        unsigned char byte;
-        int bytes = readByteSerialPort(&byte);
-        nBytesBuf += bytes;
-
-        printf("Byte received: %c\n", byte);
-
-        if (byte == 'z')
+        if (readByteSerialPort(&byte) > 0)
         {
-            printf("Received 'z' char. Stop reading from serial port.\n");
-            STOP = TRUE;
+            switch (state)
+            {
+                case START:
+                    if (byte == FLAG) state = FLAG_RCV;
+                    break;
+                case FLAG_RCV:
+                    if (byte == A_TX) state = A_RCV; // Emissor envia com A=0x03[cite: 2]
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case A_RCV:
+                    if (byte == C_SET) state = C_RCV;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case C_RCV:
+                    if (byte == (A_TX ^ C_SET)) state = BCC_OK;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case BCC_OK:
+                    if (byte == FLAG) state = STOP_STATE;
+                    else state = START;
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
-    printf("Total bytes received: %d\n", nBytesBuf);
+    printf("Recetor: Trama SET recebida corretamente!\n");
 
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
-        perror("closeSerialPort");
-        return -1;
-    }
+    // 2. Construir e enviar a resposta UA
+    unsigned char uaFrame[5];
+    uaFrame[0] = FLAG;
+    uaFrame[1] = A_TX; // Respostas do recetor também usam A=0x03[cite: 2]
+    uaFrame[2] = C_UA; // 0x07
+    uaFrame[3] = uaFrame[1] ^ uaFrame[2]; // BCC1
+    uaFrame[4] = FLAG;
 
-    printf("Serial port %s closed\n", llParameters.serialPort);
+    int bytesWritten = writeBytesSerialPort(uaFrame, 5);
+    printf("Recetor: Enviou trama UA (%d bytes). Ligacao estabelecida.\n", bytesWritten);
 
+    // NOTA: A porta série NÃO é fechada aqui. Fica aberta para o llReceive().
     return 0;
 }
 
@@ -122,8 +169,7 @@ int llOpenRx(LinkLayer llParameters)
 ////////////////////////////////////////////////
 int llSend(const unsigned char *buf, int bufSize)
 {
-    // TODO: Implement this function
-
+    // TODO: Implement this function (Fase de transferência de dados)
     return 0;
 }
 
@@ -132,8 +178,7 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llReceive(unsigned char *packet)
 {
-    // TODO: Implement this function
-
+    // TODO: Implement this function (Fase de transferência de dados)
     return 0;
 }
 
@@ -142,14 +187,14 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    // TODO: Implement this function
-
+    // TODO: Implement this function (Fase de Terminação)
+    // Aqui irás enviar o DISC, ler DISC, enviar UA e finalmente fechar a porta.
     return 0;
 }
 
 int llCloseRx()
 {
-    // TODO: Implement this function
-
+    // TODO: Implement this function (Fase de Terminação)
+    // Aqui irás ler o DISC, enviar DISC, ler UA e finalmente fechar a porta.
     return 0;
 }
