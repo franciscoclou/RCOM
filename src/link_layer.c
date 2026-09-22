@@ -50,6 +50,11 @@ int llOpenTx(LinkLayer llParameters)
     setFrame[3] = setFrame[1] ^ setFrame[2]; // BCC1
     setFrame[4] = FLAG;
 
+    printf("Transmissor: A enviar trama SET...\n");
+    for(int i = 0; i < 5; i++) {
+        printf("Enviado: 0x%02X\n", setFrame[i]);
+    }
+
     int bytesWritten = writeBytesSerialPort(setFrame, 5);
     printf("Transmissor: Enviou trama SET (%d bytes)\n", bytesWritten);
 
@@ -62,13 +67,15 @@ int llOpenTx(LinkLayer llParameters)
     {
         if (readByteSerialPort(&byte) > 0)
         {
+            printf("Transmissor leu byte: 0x%02X\n", byte); // Print do byte recebido
+            
             switch (state)
             {
                 case START:
                     if (byte == FLAG) state = FLAG_RCV;
                     break;
                 case FLAG_RCV:
-                    if (byte == A_TX) state = A_RCV; // Respostas do recetor usam A=0x03[cite: 2]
+                    if (byte == A_TX) state = A_RCV; // Respostas do recetor usam A=0x03
                     else if (byte == FLAG) state = FLAG_RCV;
                     else state = START;
                     break;
@@ -117,13 +124,15 @@ int llOpenRx(LinkLayer llParameters)
     {
         if (readByteSerialPort(&byte) > 0)
         {
+            printf("Recetor leu byte: 0x%02X\n", byte); // Print do byte recebido
+
             switch (state)
             {
                 case START:
                     if (byte == FLAG) state = FLAG_RCV;
                     break;
                 case FLAG_RCV:
-                    if (byte == A_TX) state = A_RCV; // Emissor envia com A=0x03[cite: 2]
+                    if (byte == A_TX) state = A_RCV; // Emissor envia com A=0x03
                     else if (byte == FLAG) state = FLAG_RCV;
                     else state = START;
                     break;
@@ -152,10 +161,15 @@ int llOpenRx(LinkLayer llParameters)
     // 2. Construir e enviar a resposta UA
     unsigned char uaFrame[5];
     uaFrame[0] = FLAG;
-    uaFrame[1] = A_TX; // Respostas do recetor também usam A=0x03[cite: 2]
+    uaFrame[1] = A_TX; // Respostas do recetor também usam A=0x03
     uaFrame[2] = C_UA; // 0x07
     uaFrame[3] = uaFrame[1] ^ uaFrame[2]; // BCC1
     uaFrame[4] = FLAG;
+
+    printf("Recetor: A enviar trama UA...\n");
+    for(int i = 0; i < 5; i++) {
+        printf("Enviado: 0x%02X\n", uaFrame[i]);
+    }
 
     int bytesWritten = writeBytesSerialPort(uaFrame, 5);
     printf("Recetor: Enviou trama UA (%d bytes). Ligacao estabelecida.\n", bytesWritten);
