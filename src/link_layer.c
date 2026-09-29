@@ -4,6 +4,7 @@
 
 #include "link_layer.h"
 #include "serial_port.h"
+#include "alarm_sigaction.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -51,11 +52,12 @@ int llOpenTx(LinkLayer llParameters)
     setFrame[4] = FLAG;
 
     printf("Transmissor: A enviar trama SET...\n");
+    int bytesWritten = writeBytesSerialPort(setFrame, 5);
+
     for(int i = 0; i < 5; i++) {
         printf("Enviado: 0x%02X\n", setFrame[i]);
     }
 
-    int bytesWritten = writeBytesSerialPort(setFrame, 5);
     printf("Transmissor: Enviou trama SET (%d bytes)\n", bytesWritten);
 
     // 2. Ler a trama UA usando uma Máquina de Estados
