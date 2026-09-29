@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include "alarm_sigaction.h"
 
 #define FALSE 0
 #define TRUE 1
