@@ -6,6 +6,8 @@
 #include "serial_port.h"
 #include "alarm_sigaction.h"
 
+#include <signal.h>
+#include <stdio.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -19,6 +21,8 @@
 #define A_RX 0x01 // Comandos do Recetor ou Respostas do Emissor
 #define C_SET 0x03
 #define C_UA 0x07
+
+#define MAX_TRIES 4
 
 // Enumeração para a Máquina de Estados
 typedef enum {
@@ -42,7 +46,17 @@ int llOpenTx(LinkLayer llParameters)
     }
 
     printf("Serial port %s opened\n", llParameters.serialPort);
-
+    State state = START;
+    unsigned char byte;
+        struct sigaction act = {0};
+        act.sa_handler = &alarmHandler;
+    if (sigaction(SIGALRM, &act, NULL) == -1)
+    {
+        perror("sigaction");
+        exit(1);
+    }
+    alarmEnabled = FALSE;
+    alarmCount = 0;
     // 1. Construir e enviar a trama SET
     unsigned char setFrame[5];
     setFrame[0] = FLAG;
@@ -51,54 +65,58 @@ int llOpenTx(LinkLayer llParameters)
     setFrame[3] = setFrame[1] ^ setFrame[2]; // BCC1
     setFrame[4] = FLAG;
 
-    printf("Transmissor: A enviar trama SET...\n");
-    int bytesWritten = writeBytesSerialPort(setFrame, 5);
+    while (alarmCount < MAX_TRIES && state != STOP_STATE){
+        printf("Transmissor: A enviar trama SET...\n");
+        int bytesWritten = writeBytesSerialPort(setFrame, 5);
 
-    for(int i = 0; i < 5; i++) {
-        printf("Enviado: 0x%02X\n", setFrame[i]);
-    }
+        for(int i = 0; i < 5; i++) {
+            printf("Enviado: 0x%02X\n", setFrame[i]);
+        }
 
-    printf("Transmissor: Enviou trama SET (%d bytes)\n", bytesWritten);
+        printf("Transmissor: Enviou trama SET (%d bytes)\n", bytesWritten);
 
-    // 2. Ler a trama UA usando uma Máquina de Estados
-    State state = START;
-    unsigned char byte;
-    
-    printf("Transmissor: A aguardar trama UA...\n");
-    while (state != STOP_STATE)
-    {
-        if (readByteSerialPort(&byte) > 0)
+        alarm(3);
+        alarmEnabled = 1;
+
+        printf("Transmissor: A aguardar trama UA...\n");
+        while (state != STOP_STATE && alarmEnabled = 1)
         {
-            printf("Transmissor leu byte: 0x%02X\n", byte); // Print do byte recebido
-            
-            switch (state)
+            if (readByteSerialPort(&byte) > 0)
             {
-                case START:
-                    if (byte == FLAG) state = FLAG_RCV;
-                    break;
-                case FLAG_RCV:
-                    if (byte == A_TX) state = A_RCV; // Respostas do recetor usam A=0x03
-                    else if (byte == FLAG) state = FLAG_RCV;
-                    else state = START;
-                    break;
-                case A_RCV:
-                    if (byte == C_UA) state = C_RCV;
-                    else if (byte == FLAG) state = FLAG_RCV;
-                    else state = START;
-                    break;
-                case C_RCV:
-                    if (byte == (A_TX ^ C_UA)) state = BCC_OK;
-                    else if (byte == FLAG) state = FLAG_RCV;
-                    else state = START;
-                    break;
-                case BCC_OK:
-                    if (byte == FLAG) state = STOP_STATE;
-                    else state = START;
-                    break;
-                default:
-                    break;
+                printf("Transmissor leu byte: 0x%02X\n", byte); // Print do byte recebido
+                
+                switch (state)
+                {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == A_TX) state = A_RCV; // Respostas do recetor usam A=0x03
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == C_UA) state = C_RCV;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (A_TX ^ C_UA)) state = BCC_OK;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == FLAG) state = STOP_STATE;
+                        else state = START;
+                        break;
+                    default:
+                        break;
+                }
             }
         }
+    }
+    if (state != STOP_STATE){
+        exit("FAILED");
     }
 
     printf("Transmissor: Trama UA recebida com sucesso! Ligacao estabelecida.\n");
