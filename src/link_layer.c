@@ -25,8 +25,6 @@
 
 int global_timeout = 0;
 int global_nRetransmissions = 0;
-int alarmEnabled = 0;
-int alarmCount = 0;
 
 // Enumeração para a Máquina de Estados
 typedef enum {
