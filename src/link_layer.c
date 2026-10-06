@@ -340,8 +340,130 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llReceive(unsigned char *packet)
 {
-    // TODO: Implement this function (Fase de transferência de dados)
-    return 0;
+    static int rx_nr = 0; // Próximo número de sequência N(s) esperado (0 ou 1)
+    
+    unsigned char byte, c_byte;
+    State state = START;
+    
+    // Alocar um buffer temporário largo o suficiente para receber os dados
+    // (inclui espaço para o BCC2 no final).
+    int temp_buf_size = 2048; 
+    unsigned char *temp_buffer = (unsigned char *)malloc(temp_buf_size);
+    if (!temp_buffer) return -1;
+
+    int packetSize = 0;
+    int is_escape = 0;
+
+    // Fica no ciclo até conseguir receber uma trama válida corretamente
+    while (1) {
+        state = START;
+        packetSize = 0;
+        is_escape = 0;
+        int frame_complete = 0;
+
+        // Máquina de estados para ler uma trama de Informação (I)
+        while (!frame_complete) {
+            if (readByteSerialPort(&byte) > 0) {
+                switch (state) {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == A_TX) state = A_RCV; // A_TX = 0x03, usado em Comandos do Emissor
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == 0x00 || byte == 0x80) { // N(s)=0 ou N(s)=1
+                            c_byte = byte;
+                            state = C_RCV;
+                        } 
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (A_TX ^ c_byte)) { // Validação do BCC1
+                            state = BCC_OK;
+                        } 
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START; // Cabeçalho errado, ignora a trama
+                        break;
+                    case BCC_OK:
+                        // A partir daqui estamos a ler os Dados + BCC2
+                        if (byte == FLAG) {
+                            frame_complete = 1; // Chegamos ao fim da trama
+                        } else if (byte == 0x7D) {
+                            is_escape = 1; // Encontramos o byte de escape
+                        } else {
+                            if (is_escape) {
+                                // Destuffing: faz XOR com 0x20
+                                temp_buffer[packetSize++] = byte ^ 0x20; 
+                                is_escape = 0;
+                            } else {
+                                temp_buffer[packetSize++] = byte;
+                            }
+                        }
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
+        // Se a trama estiver completa e contiver dados (pelo menos 1 byte do BCC2)
+        if (packetSize > 0) {
+            int data_length = packetSize - 1; // O último byte lido é o BCC2
+            unsigned char received_bcc2 = temp_buffer[data_length];
+            
+            // Recalcular o BCC2
+            unsigned char calc_bcc2 = temp_buffer[0];
+            for (int i = 1; i < data_length; i++) {
+                calc_bcc2 ^= temp_buffer[i];
+            }
+
+            int ns_received = (c_byte == 0x80) ? 1 : 0;
+            
+            // Decidir como responder (RR ou REJ) de acordo com o guião
+            if (calc_bcc2 == received_bcc2) { // Dados recebidos sem erros
+                if (ns_received == rx_nr) {
+                    // É a trama que estávamos à espera (Nova Trama)
+                    rx_nr = (rx_nr == 0) ? 1 : 0; // Avança o N(r) esperado
+                    
+                    // Copia os dados validados para o array da aplicação
+                    for (int i = 0; i < data_length; i++) {
+                        packet[i] = temp_buffer[i];
+                    }
+                    
+                    // Responde com RR (Positive ACK) pedindo a *próxima* trama
+                    unsigned char rr_c = (rx_nr == 0) ? 0xAA : 0xAB; // RR0 (0xAA) ou RR1 (0xAB)
+                    unsigned char rr_frame[5] = {FLAG, A_TX, rr_c, A_TX ^ rr_c, FLAG};
+                    writeBytesSerialPort(rr_frame, 5);
+                    
+                    free(temp_buffer);
+                    return data_length; // Retorna à aplicação
+                } else {
+                    // É uma Trama Duplicada (o RR anterior deve ter-se perdido)
+                    // Descarta os dados, mas envia RR indicando qual é a trama que o recetor quer receber
+                    unsigned char rr_c = (rx_nr == 0) ? 0xAA : 0xAB; 
+                    unsigned char rr_frame[5] = {FLAG, A_TX, rr_c, A_TX ^ rr_c, FLAG};
+                    writeBytesSerialPort(rr_frame, 5);
+                    // Continua no while(1) à espera da trama correta
+                }
+            } else { // Erro nos Dados (BCC2 Falhou)
+                if (ns_received == rx_nr) {
+                    // É a trama correta mas com erros. Envia REJ (Negative ACK)
+                    unsigned char rej_c = (rx_nr == 0) ? 0x54 : 0x55; // REJ0 (0x54) ou REJ1 (0x55)
+                    unsigned char rej_frame[5] = {FLAG, A_TX, rej_c, A_TX ^ rej_c, FLAG};
+                    writeBytesSerialPort(rej_frame, 5);
+                } else {
+                    // É um duplicado que ainda por cima vem com erros. Pede o N(r) correto usando RR.
+                    unsigned char rr_c = (rx_nr == 0) ? 0xAA : 0xAB; 
+                    unsigned char rr_frame[5] = {FLAG, A_TX, rr_c, A_TX ^ rr_c, FLAG};
+                    writeBytesSerialPort(rr_frame, 5);
+                }
+            }
+        }
+    }
 }
 
 ////////////////////////////////////////////////
