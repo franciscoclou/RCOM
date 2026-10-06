@@ -23,6 +23,10 @@
 #define C_SET 0x03
 #define C_UA 0x07
 
+int global_timeout = 0;
+int global_nRetransmissions = 0;
+int alarmEnabled = 0;
+int alarmCount = 0;
 
 // Enumeração para a Máquina de Estados
 typedef enum {
@@ -37,8 +41,10 @@ typedef enum {
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
-int llOpenTx(LinkLayer llParameters)
-{
+int llOpenTx(LinkLayer llParameters) {
+    global_timeout = llParameters.timeout;
+    global_nRetransmissions = llParameters.nRetransmissions;
+
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -205,8 +211,128 @@ int llOpenRx(LinkLayer llParameters)
 ////////////////////////////////////////////////
 int llSend(const unsigned char *buf, int bufSize)
 {
-    // TODO: Implement this function (Fase de transferência de dados)
-    return 0;
+    static int tx_ns = 0; // Variável estática para alternar o N(s) entre 0 e 1 a cada envio com sucesso
+
+    // 1. Calcular C e BCC1
+    unsigned char c_byte = (tx_ns == 0) ? 0x00 : 0x80;
+    unsigned char bcc1 = A_TX ^ c_byte;
+
+    // 2. Calcular BCC2 (D1 ^ D2 ^ ... ^ Dn) antes do byte stuffing
+    unsigned char bcc2 = buf[0];
+    for (int i = 1; i < bufSize; i++) {
+        bcc2 ^= buf[i];
+    }
+
+    // 3. Alocar espaço para a nova trama com stuffing 
+    // Tamanho máximo teórico: F(1) + A(1) + C(1) + BCC1(1) + Dados_Stuffed(bufSize * 2) + BCC2_Stuffed(2) + F(1)
+    int max_frame_size = 5 + (bufSize + 1) * 2;
+    unsigned char *frame = (unsigned char *)malloc(max_frame_size);
+    if (frame == NULL) return -1;
+
+    int frame_idx = 0;
+    frame[frame_idx++] = FLAG;
+    frame[frame_idx++] = A_TX;
+    frame[frame_idx++] = c_byte;
+    frame[frame_idx++] = bcc1;
+
+    // Função de Byte Stuffing para o buffer de dados
+    for (int i = 0; i < bufSize; i++) {
+        if (buf[i] == FLAG) {
+            frame[frame_idx++] = 0x7D;
+            frame[frame_idx++] = 0x5E;
+        } else if (buf[i] == 0x7D) {
+            frame[frame_idx++] = 0x7D;
+            frame[frame_idx++] = 0x5D;
+        } else {
+            frame[frame_idx++] = buf[i];
+        }
+    }
+
+    // Byte Stuffing para o BCC2
+    if (bcc2 == FLAG) {
+        frame[frame_idx++] = 0x7D;
+        frame[frame_idx++] = 0x5E;
+    } else if (bcc2 == 0x7D) {
+        frame[frame_idx++] = 0x7D;
+        frame[frame_idx++] = 0x5D;
+    } else {
+        frame[frame_idx++] = bcc2;
+    }
+
+    frame[frame_idx++] = FLAG; // FLAG de fecho
+    int frame_size = frame_idx;
+
+    // 4. Lógica de Envio e Retransmissões (Stop-and-Wait)
+    int frame_accepted = 0;
+    alarmCount = 0;
+
+    unsigned char expected_rr = (tx_ns == 0) ? 0xAB : 0xAA; // RR1 se N(s)=0, RR0 se N(s)=1
+    unsigned char expected_rej = (tx_ns == 0) ? 0x54 : 0x55; // REJ0 se N(s)=0, REJ1 se N(s)=1
+
+    while (alarmCount <= global_nRetransmissions && !frame_accepted) {
+        writeBytesSerialPort(frame, frame_size);
+        
+        alarmEnabled = 1;
+        alarm(global_timeout);
+
+        State state = START;
+        unsigned char byte;
+        unsigned char control_received = 0;
+
+        // 5. Máquina de Estados para receção da confirmação
+        while (state != STOP_STATE && alarmEnabled == 1) {
+            if (readByteSerialPort(&byte) > 0) {
+                switch (state) {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == A_TX) state = A_RCV; 
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == expected_rr || byte == expected_rej) {
+                            control_received = byte;
+                            state = C_RCV;
+                        } 
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (A_TX ^ control_received)) state = BCC_OK;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == FLAG) {
+                            state = STOP_STATE;
+                            if (control_received == expected_rr) {
+                                frame_accepted = 1;
+                            } else if (control_received == expected_rej) {
+                                // Foi recebido um REJ (Negative ACK) -> Forçar retransmissão imediata
+                                alarm(0); 
+                                alarmEnabled = 0; 
+                            }
+                        }
+                        else state = START;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+
+    free(frame);
+    alarm(0); // Desativar alarme de segurança
+
+    if (!frame_accepted) {
+        return -1; // Falhou após exceder o limite de retransmissões
+    }
+
+    tx_ns = (tx_ns == 0) ? 1 : 0; // Alternar o número de sequência para a próxima trama
+    return bufSize;
 }
 
 ////////////////////////////////////////////////
