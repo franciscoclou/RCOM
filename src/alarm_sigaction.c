@@ -19,32 +19,3 @@ void alarmHandler(int signal)
 
     printf("Alarm #%d received\n", alarmCount);
 }
-
-int main()
-{
-    // Set alarm function handler.
-    // Install the function signal to be automatically invoked when the timer expires,
-    // invoking in its turn the user function alarmHandler
-    struct sigaction act = {0};
-    act.sa_handler = &alarmHandler;
-    if (sigaction(SIGALRM, &act, NULL) == -1)
-    {
-        perror("sigaction");
-        exit(1);
-    }
-
-    printf("Alarm configured\n");
-
-    while (alarmCount < 4)
-    {
-        if (alarmEnabled == FALSE)
-        {
-            alarm(3); // Set alarm to be triggered in 3s
-            alarmEnabled = TRUE;
-        }
-    }
-
-    printf("Ending program\n");
-
-    return 0;
-}

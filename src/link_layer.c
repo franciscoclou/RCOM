@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 // MISC
@@ -22,7 +23,6 @@
 #define C_SET 0x03
 #define C_UA 0x07
 
-#define MAX_TRIES 4
 
 // Enumeração para a Máquina de Estados
 typedef enum {
@@ -65,7 +65,7 @@ int llOpenTx(LinkLayer llParameters)
     setFrame[3] = setFrame[1] ^ setFrame[2]; // BCC1
     setFrame[4] = FLAG;
 
-    while (alarmCount < MAX_TRIES && state != STOP_STATE){
+    while (alarmCount <= llParameters.nRetransmissions && state != STOP_STATE){
         printf("Transmissor: A enviar trama SET...\n");
         int bytesWritten = writeBytesSerialPort(setFrame, 5);
 
@@ -75,11 +75,11 @@ int llOpenTx(LinkLayer llParameters)
 
         printf("Transmissor: Enviou trama SET (%d bytes)\n", bytesWritten);
 
-        alarm(3);
+        alarm(llParameters.timeout);
         alarmEnabled = 1;
 
         printf("Transmissor: A aguardar trama UA...\n");
-        while (state != STOP_STATE && alarmEnabled = 1)
+        while (state != STOP_STATE && alarmEnabled == 1)
         {
             if (readByteSerialPort(&byte) > 0)
             {
@@ -116,7 +116,9 @@ int llOpenTx(LinkLayer llParameters)
         }
     }
     if (state != STOP_STATE){
-        exit("FAILED");
+        fprintf(stderr, "Transmissor: ERRO - nenhuma trama UA recebida apos %d tentativas\n", llParameters.nRetransmissions + 1);
+        closeSerialPort();
+        return -1;
     }
 
     printf("Transmissor: Trama UA recebida com sucesso! Ligacao estabelecida.\n");

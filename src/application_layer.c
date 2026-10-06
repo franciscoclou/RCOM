@@ -6,6 +6,7 @@
 #include "link_layer.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
@@ -24,7 +25,11 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
 
     if (strcmp(role, "tx") == 0)
     {
-        llOpenTx(llParameters);
+        if (llOpenTx(llParameters) < 0)
+        {
+            fprintf(stderr, "llopen falhou\n");
+            exit(1);
+        }
     }
     else if (strcmp(role, "rx") == 0)
     {
