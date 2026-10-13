@@ -22,6 +22,7 @@
 #define A_RX 0x01 // Comandos do Recetor ou Respostas do Emissor
 #define C_SET 0x03
 #define C_UA 0x07
+#define C_DISC 0x0B
 
 #define ESC 0x7D
 #define MAX_RX_BUF 2048
@@ -30,6 +31,10 @@
 // (alarm_sigaction.h deve declará-los como "extern int ...;")
 int global_timeout = 0;
 int global_nRetransmissions = 0;
+
+// Próximo N(s) esperado pelo recetor (0 ou 1).
+// Fica fora do llReceive porque o llCloseRx também precisa dele.
+static int rx_nr = 0;
 
 // Enumeração para a Máquina de Estados
 typedef enum {
@@ -41,11 +46,61 @@ typedef enum {
     STOP_STATE
 } State;
 
-// Envia uma trama de supervisão/não numerada (5 bytes) com A = A_TX
-static void sendSupervisionFrame(unsigned char control)
+// Envia uma trama de supervisão/não numerada (5 bytes)
+static void sendSupervisionFrame(unsigned char address, unsigned char control)
 {
-    unsigned char frame[5] = {FLAG, A_TX, control, (unsigned char)(A_TX ^ control), FLAG};
+    unsigned char frame[5] = {FLAG, address, control, (unsigned char)(address ^ control), FLAG};
     writeBytesSerialPort(frame, 5);
+}
+
+// Lê uma trama completa com cabeçalho válido (BCC1 certo) e devolve A e C.
+// Os dados de tramas I são ignorados (não verifica BCC2).
+// Se useAlarm for TRUE, desiste quando o alarme dispara.
+// Retorna 0 se leu uma trama ou -1 se o alarme disparou.
+static int readFrame(unsigned char *a, unsigned char *c, int useAlarm)
+{
+    State state = START;
+    unsigned char byte;
+
+    while (!useAlarm || alarmEnabled == 1)
+    {
+        if (readByteSerialPort(&byte) <= 0) continue;
+
+        switch (state)
+        {
+            case START:
+                if (byte == FLAG) state = FLAG_RCV;
+                break;
+            case FLAG_RCV:
+                if (byte == A_TX || byte == A_RX) {
+                    *a = byte;
+                    state = A_RCV;
+                }
+                else if (byte != FLAG) state = START;
+                break;
+            case A_RCV:
+                if (byte == FLAG) state = FLAG_RCV;
+                else {
+                    *c = byte;
+                    state = C_RCV;
+                }
+                break;
+            case C_RCV:
+                if (byte == (*a ^ *c)) state = BCC_OK;
+                else if (byte == FLAG) state = FLAG_RCV;
+                else state = START;
+                break;
+            case BCC_OK:
+                // Numa trama S/U o próximo byte é a FLAG; numa trama I
+                // salta os dados até à FLAG de fecho
+                if (byte == FLAG) return 0;
+                break;
+            default:
+                break;
+        }
+    }
+
+    return -1;
 }
 
 ////////////////////////////////////////////////
@@ -151,6 +206,9 @@ int llOpenTx(LinkLayer llParameters)
 
 int llOpenRx(LinkLayer llParameters)
 {
+    global_timeout = llParameters.timeout;
+    global_nRetransmissions = llParameters.nRetransmissions;
+
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -204,7 +262,7 @@ int llOpenRx(LinkLayer llParameters)
 
     // 2. Enviar a resposta UA
     printf("Recetor: A enviar trama UA...\n");
-    sendSupervisionFrame(C_UA);
+    sendSupervisionFrame(A_TX, C_UA);
     printf("Recetor: Enviou trama UA. Ligacao estabelecida.\n");
 
     // NOTA: A porta série NÃO é fechada aqui. Fica aberta para o llReceive().
@@ -348,7 +406,6 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llReceive(unsigned char *packet)
 {
-    static int rx_nr = 0; // Próximo N(s) esperado (0 ou 1)
 
     unsigned char byte;
     unsigned char c_byte = 0;
@@ -424,7 +481,7 @@ int llReceive(unsigned char *packet)
 
         // SET repetido: o UA anterior perdeu-se, voltar a responder
         if (c_byte == C_SET) {
-            sendSupervisionFrame(C_UA);
+            sendSupervisionFrame(A_TX, C_UA);
             continue;
         }
 
@@ -451,21 +508,21 @@ int llReceive(unsigned char *packet)
                 }
 
                 // RR com o próximo N(r) esperado
-                sendSupervisionFrame((rx_nr == 0) ? 0xAA : 0xAB);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
 
                 free(temp_buffer);
                 return data_length;
             } else {
                 // Duplicado: descarta e volta a pedir a trama certa
-                sendSupervisionFrame((rx_nr == 0) ? 0xAA : 0xAB);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
             }
         } else { // BCC2 falhou
             if (ns_received == rx_nr) {
                 // Trama esperada com erros -> REJ
-                sendSupervisionFrame((rx_nr == 0) ? 0x54 : 0x55);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0x54 : 0x55);
             } else {
                 // Duplicado com erros -> RR a pedir a trama certa
-                sendSupervisionFrame((rx_nr == 0) ? 0xAA : 0xAB);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
             }
         }
     }
@@ -476,14 +533,114 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    // TODO: Implement this function (Fase de Terminação)
-    // Aqui irás enviar o DISC, ler DISC, enviar UA e finalmente fechar a porta.
+    unsigned char a, c;
+    int discReceived = 0;
+    alarmCount = 0;
+
+    // 1. Enviar DISC e esperar pelo DISC do recetor (com retransmissões)
+    while (alarmCount <= global_nRetransmissions && !discReceived)
+    {
+        printf("Transmissor: A enviar trama DISC...\n");
+        sendSupervisionFrame(A_TX, C_DISC); // Comando do emissor -> A = 0x03
+
+        alarmEnabled = 1;
+        alarm(global_timeout);
+
+        while (alarmEnabled == 1 && !discReceived)
+        {
+            // DISC do recetor é um comando do recetor -> A = 0x01
+            if (readFrame(&a, &c, TRUE) == 0 && a == A_RX && c == C_DISC)
+                discReceived = 1;
+        }
+    }
+
+    alarm(0);
+
+    if (!discReceived)
+    {
+        fprintf(stderr, "Transmissor: ERRO - nenhuma trama DISC recebida apos %d tentativas\n",
+                global_nRetransmissions + 1);
+        closeSerialPort();
+        return -1;
+    }
+
+    printf("Transmissor: Trama DISC recebida. A enviar UA...\n");
+
+    // 2. Enviar UA (resposta do emissor -> A = 0x01)
+    sendSupervisionFrame(A_RX, C_UA);
+
+    if (closeSerialPort() < 0) return -1;
+
+    printf("Transmissor: Ligacao terminada.\n");
     return 0;
 }
 
 int llCloseRx()
 {
-    // TODO: Implement this function (Fase de Terminação)
-    // Aqui irás ler o DISC, enviar DISC, ler UA e finalmente fechar a porta.
+    unsigned char a, c;
+
+    // O recetor também precisa do alarme para retransmitir o seu DISC
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
+    if (sigaction(SIGALRM, &act, NULL) == -1)
+    {
+        perror("sigaction");
+        closeSerialPort();
+        return -1;
+    }
+
+    // 1. Esperar pelo DISC do emissor (A = 0x03)
+    printf("Recetor: A aguardar trama DISC...\n");
+    while (1)
+    {
+        readFrame(&a, &c, FALSE);
+
+        if (a == A_TX && c == C_DISC) break;
+
+        // Trama I repetida: o último RR perdeu-se, voltar a confirmar
+        if (a == A_TX && (c == 0x00 || c == 0x80))
+            sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+    }
+
+    printf("Recetor: Trama DISC recebida.\n");
+
+    // 2. Enviar DISC (comando do recetor -> A = 0x01) e esperar UA (A = 0x01)
+    int uaReceived = 0;
+    alarmCount = 0;
+
+    while (alarmCount <= global_nRetransmissions && !uaReceived)
+    {
+        printf("Recetor: A enviar trama DISC...\n");
+        sendSupervisionFrame(A_RX, C_DISC);
+
+        alarmEnabled = 1;
+        alarm(global_timeout);
+
+        while (alarmEnabled == 1 && !uaReceived)
+        {
+            if (readFrame(&a, &c, TRUE) != 0) break;
+
+            if (a == A_RX && c == C_UA)
+                uaReceived = 1;
+            else if (a == A_TX && c == C_DISC)
+            {
+                // O nosso DISC perdeu-se e o emissor repetiu o dele: reenviar já
+                alarm(0);
+                alarmEnabled = 0;
+            }
+        }
+    }
+
+    alarm(0);
+    closeSerialPort();
+
+    if (!uaReceived)
+    {
+        fprintf(stderr, "Recetor: ERRO - nenhuma trama UA recebida apos %d tentativas\n",
+                global_nRetransmissions + 1);
+        return -1;
+    }
+
+    printf("Recetor: Trama UA recebida. Ligacao terminada.\n");
     return 0;
 }

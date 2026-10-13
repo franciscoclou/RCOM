@@ -47,6 +47,13 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         if (n < 0) exit(1);
 
         printf("TEST: all frames sent\n");
+
+        if (llCloseTx() < 0)
+        {
+            fprintf(stderr, "TEST: llCloseTx failed\n");
+            exit(1);
+        }
+        printf("TEST: llCloseTx OK\n");
         // ---------------------------------------------------
     }
     else if (strcmp(role, "rx") == 0)
@@ -78,6 +85,13 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         }
 
         printf("TEST: all frames received\n");
+
+        if (llCloseRx() < 0)
+        {
+            fprintf(stderr, "TEST: llCloseRx failed\n");
+            exit(1);
+        }
+        printf("TEST: llCloseRx OK\n");
         // ------------------------------------------------
     }
     else
