@@ -20,7 +20,15 @@
 
 // Data packet header: C + L2 + L1
 #define DATA_HEADER_SIZE 3
+// File bytes per data packet; can be lowered at compile time (-DMAX_DATA_SIZE=...)
+// to vary the I frame size in the efficiency tests
+#ifndef MAX_DATA_SIZE
 #define MAX_DATA_SIZE (MAX_PAYLOAD_SIZE - DATA_HEADER_SIZE)
+#endif
+
+#if MAX_DATA_SIZE < 1 || MAX_DATA_SIZE > MAX_PAYLOAD_SIZE - DATA_HEADER_SIZE
+#error "MAX_DATA_SIZE must be between 1 and MAX_PAYLOAD_SIZE - DATA_HEADER_SIZE"
+#endif
 
 // llReceive may write up to this many bytes into the packet buffer
 #define RX_PACKET_BUF 2048
@@ -101,27 +109,20 @@ static int parseControlPacket(const unsigned char *packet, int size, FileInfo *i
     return hasSize ? 0 : -1;
 }
 
-static int transmitFile(const char *filename)
+// Sends the already opened file (START, DATA..., END). Does not close the file.
+static int transmitFile(FILE *file, const char *filename, long fileSize)
 {
-    FILE *file = fopen(filename, "rb");
-    if (file == NULL)
-    {
-        perror("fopen");
-        return -1;
-    }
-
-    fseek(file, 0, SEEK_END);
-    long fileSize = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
     unsigned char packet[MAX_PAYLOAD_SIZE];
+
+    // Only the file name goes in the packets, not the local path
+    const char *slash = strrchr(filename, '/');
+    if (slash != NULL) filename = slash + 1;
 
     // 1. START packet
     int packetSize = buildControlPacket(C_START, fileSize, filename, packet);
     if (llSend(packet, packetSize) < 0)
     {
         fprintf(stderr, "Application: failed to send START packet\n");
-        fclose(file);
         return -1;
     }
     printf("Application: START sent (file \"%s\", %ld bytes)\n", filename, fileSize);
@@ -138,7 +139,6 @@ static int transmitFile(const char *filename)
         if (llSend(packet, nBytes + DATA_HEADER_SIZE) < 0)
         {
             fprintf(stderr, "Application: failed to send data packet\n");
-            fclose(file);
             return -1;
         }
 
@@ -149,10 +149,8 @@ static int transmitFile(const char *filename)
     if (ferror(file))
     {
         perror("fread");
-        fclose(file);
         return -1;
     }
-    fclose(file);
 
     // 3. END packet (repeats the START information)
     packetSize = buildControlPacket(C_END, fileSize, filename, packet);
@@ -284,23 +282,46 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
 
     if (strcmp(role, "tx") == 0)
     {
-        if (llOpenTx(llParameters) < 0)
+        // Open the file before the link so a bad filename fails without connecting
+        FILE *file = fopen(filename, "rb");
+        if (file == NULL)
         {
-            fprintf(stderr, "Application: llOpenTx failed\n");
+            perror("fopen");
             exit(1);
         }
 
-        if (transmitFile(filename) < 0)
+        long fileSize = -1;
+        if (fseek(file, 0, SEEK_END) == 0) fileSize = ftell(file);
+        if (fileSize < 0 || fseek(file, 0, SEEK_SET) != 0)
         {
-            fprintf(stderr, "Application: file transfer failed\n");
+            perror("Application: could not get file size");
+            fclose(file);
             exit(1);
         }
+
+        if (llOpenTx(llParameters) < 0)
+        {
+            fprintf(stderr, "Application: llOpenTx failed\n");
+            fclose(file);
+            exit(1);
+        }
+
+        // Always close the link once it is open, even if the transfer failed
+        int failed = FALSE;
+        if (transmitFile(file, filename, fileSize) < 0)
+        {
+            fprintf(stderr, "Application: file transfer failed\n");
+            failed = TRUE;
+        }
+        fclose(file);
 
         if (llCloseTx() < 0)
         {
             fprintf(stderr, "Application: llCloseTx failed\n");
-            exit(1);
+            failed = TRUE;
         }
+
+        if (failed) exit(1);
     }
     else if (strcmp(role, "rx") == 0)
     {
@@ -310,17 +331,21 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             exit(1);
         }
 
+        // Always close the link once it is open, even if the reception failed
+        int failed = FALSE;
         if (receiveFile(filename) < 0)
         {
             fprintf(stderr, "Application: file reception failed\n");
-            exit(1);
+            failed = TRUE;
         }
 
         if (llCloseRx() < 0)
         {
             fprintf(stderr, "Application: llCloseRx failed\n");
-            exit(1);
+            failed = TRUE;
         }
+
+        if (failed) exit(1);
     }
     else
     {
