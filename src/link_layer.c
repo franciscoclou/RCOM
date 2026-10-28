@@ -53,10 +53,12 @@
 // (alarm_sigaction.h declares them as "extern int ...;")
 int global_timeout = 0;
 int global_nRetransmissions = 0;
+int global_baudRate = 0;
 
 // Next N(s) expected by the receiver (0 or 1).
 // Kept outside llReceive because llCloseRx also needs it.
 static int rx_nr = 0;
+static int rx_discReceived = 0; // DISC already received by llReceive
 
 // Protocol statistics (printed by llCloseTx/llCloseRx)
 typedef struct {
@@ -180,6 +182,7 @@ int llOpenTx(LinkLayer llParameters)
 {
     global_timeout = llParameters.timeout;
     global_nRetransmissions = llParameters.nRetransmissions;
+    global_baudRate = llParameters.baudRate;
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
@@ -405,18 +408,19 @@ int llSend(const unsigned char *buf, int bufSize)
     // 4. Send and retransmit (Stop-and-Wait)
     int frame_accepted = 0;
     int attempts = 0;
+    int rejCount = 0;
     alarmCount = 0;
 
     unsigned char expected_rr  = (tx_ns == 0) ? 0xAB : 0xAA; // RR1 if N(s)=0, RR0 if N(s)=1
     unsigned char expected_rej = (tx_ns == 0) ? 0x54 : 0x55; // REJ0 if N(s)=0, REJ1 if N(s)=1
 
-    while (alarmCount <= global_nRetransmissions && !frame_accepted) {
+    while (alarmCount <= global_nRetransmissions && rejCount <= 30 && !frame_accepted) {
         writeBytesSerialPort(frame, frame_size);
         stats.iFramesSent++;
         if (attempts++ > 0) stats.retransmissions++;
 
         alarmEnabled = 1;
-        alarm(global_timeout);
+        alarm(global_timeout + frame_size * 10 / global_baudRate + 1); // + time the frame takes on the wire
 
         State state = START;
         unsigned char byte;
@@ -455,6 +459,7 @@ int llSend(const unsigned char *buf, int bufSize)
                                 frame_accepted = 1;
                             } else if (control_received == expected_rej) {
                                 stats.rejReceived++;
+                                rejCount++;
                                 // REJ -> retransmit immediately (does not count as an attempt;
                                 // the retransmission limit only applies to timeouts)
                                 alarm(0);
@@ -524,7 +529,7 @@ int llReceive(unsigned char *packet)
                         break;
                     case A_RCV:
                         // I(0), I(1) or SET (in case the UA sent by llOpen was lost)
-                        if (byte == 0x00 || byte == 0x80 || byte == C_SET) {
+                        if (byte == 0x00 || byte == 0x80 || byte == C_SET || byte == C_DISC) {
                             c_byte = byte;
                             state = C_RCV;
                         }
@@ -559,6 +564,13 @@ int llReceive(unsigned char *packet)
                         break;
                 }
             }
+        }
+
+        // DISC: the transmitter is closing the connection, llCloseRx replies to it
+        if (c_byte == C_DISC) {
+            rx_discReceived = 1;
+            free(temp_buffer);
+            return -1;
         }
 
         // Repeated SET: the previous UA was lost, reply again
@@ -701,20 +713,23 @@ int llCloseRx()
         return -1;
     }
 
-    // 1. Wait for the transmitter's DISC (A = 0x03)
-    printf("Receiver: waiting for DISC frame...\n");
-    while (1)
+    // 1. Wait for the transmitter's DISC (A = 0x03), unless llReceive already got it
+    if (!rx_discReceived)
     {
-        readFrame(&a, &c, FALSE);
-
-        if (a == A_TX && c == C_DISC) break;
-
-        // Repeated I frame: the last RR was lost, acknowledge it again
-        if (a == A_TX && (c == 0x00 || c == 0x80))
+        printf("Receiver: waiting for DISC frame...\n");
+        while (1)
         {
-            sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
-            stats.rrSent++;
-            stats.duplicates++;
+            readFrame(&a, &c, FALSE);
+
+            if (a == A_TX && c == C_DISC) break;
+
+            // Repeated I frame: the last RR was lost, acknowledge it again
+            if (a == A_TX && (c == 0x00 || c == 0x80))
+            {
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                stats.rrSent++;
+                stats.duplicates++;
+            }
         }
     }
 
