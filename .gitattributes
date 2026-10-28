@@ -1,0 +1,2 @@
+# Keep Unix line endings in shell scripts, or bash fails on \r
+*.sh text eol=lf
