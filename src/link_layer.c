@@ -36,6 +36,7 @@ int global_baudRate = 0;
 // Next N(s) expected by the receiver (0 or 1).
 // Kept outside llReceive because llCloseRx also needs it.
 static int rx_nr = 0;
+static int rx_discReceived = 0; // DISC already received by llReceive
 
 // States of the frame reception state machine
 typedef enum {
@@ -447,8 +448,9 @@ int llReceive(unsigned char *packet)
                         else state = START;
                         break;
                     case A_RCV:
-                        // I(0), I(1) or SET (in case the UA sent by llOpen was lost)
-                        if (byte == 0x00 || byte == 0x80 || byte == C_SET) {
+                        // I(0), I(1), SET (in case the UA sent by llOpen was lost)
+                        // or DISC (the transmitter is closing the connection)
+                        if (byte == 0x00 || byte == 0x80 || byte == C_SET || byte == C_DISC) {
                             c_byte = byte;
                             state = C_RCV;
                         }
@@ -483,6 +485,13 @@ int llReceive(unsigned char *packet)
                         break;
                 }
             }
+        }
+
+        // DISC: the transmitter is closing the connection, llCloseRx replies to it
+        if (c_byte == C_DISC) {
+            rx_discReceived = 1;
+            free(temp_buffer);
+            return -1;
         }
 
         // Repeated SET: the previous UA was lost, reply again
@@ -595,17 +604,20 @@ int llCloseRx()
         return -1;
     }
 
-    // 1. Wait for the transmitter's DISC (A = 0x03)
-    printf("Receiver: waiting for DISC frame...\n");
-    while (1)
+    // 1. Wait for the transmitter's DISC (A = 0x03), unless llReceive already got it
+    if (!rx_discReceived)
     {
-        readFrame(&a, &c, FALSE);
+        printf("Receiver: waiting for DISC frame...\n");
+        while (1)
+        {
+            readFrame(&a, &c, FALSE);
 
-        if (a == A_TX && c == C_DISC) break;
+            if (a == A_TX && c == C_DISC) break;
 
-        // Repeated I frame: the last RR was lost, acknowledge it again
-        if (a == A_TX && (c == 0x00 || c == 0x80))
-            sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+            // Repeated I frame: the last RR was lost, acknowledge it again
+            if (a == A_TX && (c == 0x00 || c == 0x80))
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+        }
     }
 
     printf("Receiver: DISC frame received.\n");

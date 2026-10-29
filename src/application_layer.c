@@ -290,17 +290,21 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             exit(1);
         }
 
+        // Always close the link once it is open, even if the transfer failed (slide 9)
+        int failed = FALSE;
         if (transmitFile(filename) < 0)
         {
             fprintf(stderr, "Application: file transfer failed\n");
-            exit(1);
+            failed = TRUE;
         }
 
         if (llCloseTx() < 0)
         {
             fprintf(stderr, "Application: llCloseTx failed\n");
-            exit(1);
+            failed = TRUE;
         }
+
+        if (failed) exit(1);
     }
     else if (strcmp(role, "rx") == 0)
     {
@@ -310,17 +314,21 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             exit(1);
         }
 
+        // Always close the link once it is open, even if the reception failed
+        int failed = FALSE;
         if (receiveFile(filename) < 0)
         {
             fprintf(stderr, "Application: file reception failed\n");
-            exit(1);
+            failed = TRUE;
         }
 
         if (llCloseRx() < 0)
         {
             fprintf(stderr, "Application: llCloseRx failed\n");
-            exit(1);
+            failed = TRUE;
         }
+
+        if (failed) exit(1);
     }
     else
     {
