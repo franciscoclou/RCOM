@@ -113,6 +113,12 @@ static int transmitFile(const char *filename)
     fseek(file, 0, SEEK_END);
     long fileSize = ftell(file);
     fseek(file, 0, SEEK_SET);
+    if (fileSize < 0)
+    {
+        perror("ftell");
+        fclose(file);
+        return -1;
+    }
 
     unsigned char packet[MAX_PAYLOAD_SIZE];
 

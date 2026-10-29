@@ -142,7 +142,8 @@ int llOpenTx(LinkLayer llParameters)
     if (sigaction(SIGALRM, &act, NULL) == -1)
     {
         perror("sigaction");
-        exit(1);
+        closeSerialPort();
+        return -1;
     }
     alarmEnabled = 0;
     alarmCount = 0;
