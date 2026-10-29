@@ -39,3 +39,40 @@ Instructions to Run the Project
     5.1. Run receiver and transmitter again
     5.2. Quickly move to the cable program console and disable the connection and/or add noise. Check the instructions printed at the start of the program.
     5.3. Check if the file received matches the file sent, even with cable disconnections or with noise
+
+Running with the Virtual Cable using the Makefile
+-------------------------------------------------
+
+The Makefile targets use the lab serial ports by default (/dev/ttyUSB0 and /dev/ttyS0).
+To use the virtual cable, override the ports on the command line (the Makefile is not changed):
+    $ make run_cable
+    $ make run_rx RX_SERIAL_PORT=/tmp/ttyS11
+    $ make run_tx TX_SERIAL_PORT=/tmp/ttyS10
+    $ make check_files
+
+To use another baud rate, set it in the cable console first ("baud 2400") and then use
+the same value for the receiver and the transmitter:
+    $ make run_rx RX_SERIAL_PORT=/tmp/ttyS11 BAUD_RATE=2400
+    $ make run_tx TX_SERIAL_PORT=/tmp/ttyS10 BAUD_RATE=2400
+
+Useful cable console commands: on, off, ber <ber>, baud <rate>, prop <usec>, quit.
+
+Protocol Statistics
+-------------------
+
+When the connection is closed, llCloseTx() and llCloseRx() print the protocol statistics:
+I frames sent/received, retransmissions, timeouts, RR/REJ sent/received, duplicates and bytes.
+
+Measuring the Transfer Time
+---------------------------
+
+The statistics do not include the elapsed time. To measure it, start the receiver first and
+run the transmitter with the shell's "time" command (build with "make" before, so that the
+compilation is not counted):
+    $ time ./bin/main /tmp/ttyS10 9600 tx penguin.gif
+    or
+    $ time make run_tx TX_SERIAL_PORT=/tmp/ttyS10
+
+The elapsed time is the "real" value printed at the end. For the efficiency study:
+    R = file size (bytes) * 8 / real      (penguin.gif has 10968 bytes)
+    S = R / C                             (C = baud rate)
