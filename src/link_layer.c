@@ -38,6 +38,19 @@ int global_baudRate = 0;
 static int rx_nr = 0;
 static int rx_discReceived = 0; // DISC already received by llReceive
 
+// Protocol statistics, printed by llCloseTx/llCloseRx
+static int statFramesSent = 0;      // I frames written (including retransmissions)
+static int statRetransmissions = 0; // I frames resent (timeout or REJ)
+static int statTimeouts = 0;        // alarms triggered
+static int statRrReceived = 0;
+static int statRejReceived = 0;
+static long statBytesSent = 0;      // packet bytes delivered by llSend
+static int statFramesReceived = 0;  // new I frames accepted
+static int statDuplicates = 0;      // duplicate I frames discarded
+static int statRrSent = 0;
+static int statRejSent = 0;
+static long statBytesReceived = 0;  // packet bytes delivered by llReceive
+
 // States of the frame reception state machine
 typedef enum {
     START,
@@ -192,6 +205,7 @@ int llOpenTx(LinkLayer llParameters)
     }
 
     alarm(0); // disable the pending alarm
+    statTimeouts += alarmCount;
 
     if (state != STOP_STATE)
     {
@@ -333,6 +347,7 @@ int llSend(const unsigned char *buf, int bufSize)
     // 4. Send and retransmit (Stop-and-Wait)
     int frame_accepted = 0;
     int rejCount = 0;
+    int attempts = 0;
     alarmCount = 0;
 
     unsigned char expected_rr  = (tx_ns == 0) ? 0xAB : 0xAA; // RR1 if N(s)=0, RR0 if N(s)=1
@@ -340,6 +355,8 @@ int llSend(const unsigned char *buf, int bufSize)
 
     while (alarmCount <= global_nRetransmissions && rejCount <= 30 && !frame_accepted) {
         writeBytesSerialPort(frame, frame_size);
+        statFramesSent++;
+        if (attempts++ > 0) statRetransmissions++;
 
         alarmEnabled = 1;
         // write() only queues the frame: add the time it takes on the line
@@ -380,12 +397,14 @@ int llSend(const unsigned char *buf, int bufSize)
                             state = STOP_STATE;
                             if (control_received == expected_rr) {
                                 frame_accepted = 1;
+                                statRrReceived++;
                             } else if (control_received == expected_rej) {
                                 // REJ -> retransmit immediately (does not count as an attempt;
                                 // the retransmission limit only applies to timeouts)
                                 alarm(0);
                                 alarmEnabled = 0;
                                 rejCount++;
+                                statRejReceived++;
                             }
                         }
                         else state = START;
@@ -399,12 +418,14 @@ int llSend(const unsigned char *buf, int bufSize)
 
     free(frame);
     alarm(0);
+    statTimeouts += alarmCount;
 
     if (!frame_accepted) {
         return -1; // Failed after exceeding the retransmission limit
     }
 
     tx_ns = (tx_ns == 0) ? 1 : 0; // Toggle N(s) for the next frame
+    statBytesSent += bufSize;
     return bufSize;
 }
 
@@ -524,20 +545,28 @@ int llReceive(unsigned char *packet)
 
                 // RR with the next expected N(r)
                 sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                statRrSent++;
+                statFramesReceived++;
+                statBytesReceived += data_length;
 
                 free(temp_buffer);
                 return data_length;
             } else {
                 // Duplicate: discard it and ask for the right frame again
                 sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                statRrSent++;
+                statDuplicates++;
             }
         } else { // BCC2 failed
             if (ns_received == rx_nr) {
                 // Expected frame with errors -> REJ
                 sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0x54 : 0x55);
+                statRejSent++;
             } else {
                 // Duplicate with errors -> RR asking for the right frame
                 sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                statRrSent++;
+                statDuplicates++;
             }
         }
     }
@@ -570,6 +599,16 @@ int llCloseTx()
     }
 
     alarm(0);
+    statTimeouts += alarmCount;
+
+    printf("\n===== Statistics (Transmitter) =====\n");
+    printf("I frames sent:    %d\n", statFramesSent);
+    printf("Retransmissions:  %d\n", statRetransmissions);
+    printf("Timeouts:         %d\n", statTimeouts);
+    printf("RR received:      %d\n", statRrReceived);
+    printf("REJ received:     %d\n", statRejReceived);
+    printf("Bytes sent:       %ld\n", statBytesSent);
+    printf("====================================\n\n");
 
     if (!discReceived)
     {
@@ -616,7 +655,11 @@ int llCloseRx()
 
             // Repeated I frame: the last RR was lost, acknowledge it again
             if (a == A_TX && (c == 0x00 || c == 0x80))
+            {
                 sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                statRrSent++;
+                statDuplicates++;
+            }
         }
     }
 
@@ -650,7 +693,17 @@ int llCloseRx()
     }
 
     alarm(0);
+    statTimeouts += alarmCount;
     closeSerialPort();
+
+    printf("\n===== Statistics (Receiver) =====\n");
+    printf("I frames received:     %d\n", statFramesReceived);
+    printf("Duplicates discarded:  %d\n", statDuplicates);
+    printf("RR sent:               %d\n", statRrSent);
+    printf("REJ sent:              %d\n", statRejSent);
+    printf("Timeouts:              %d\n", statTimeouts);
+    printf("Bytes received:        %ld\n", statBytesReceived);
+    printf("=================================\n\n");
 
     if (!uaReceived)
     {
