@@ -13,9 +13,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-// MISC
-#define BUF_SIZE 256
-
 // Frame bytes, as defined in the protocol guide
 #define FLAG 0x7E
 #define A_TX 0x03 // Commands sent by the Transmitter or replies sent by the Receiver
