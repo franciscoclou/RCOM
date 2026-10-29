@@ -31,6 +31,7 @@
 // (alarm_sigaction.h deve declará-los como "extern int ...;")
 int global_timeout = 0;
 int global_nRetransmissions = 0;
+int global_baudRate = 0;
 
 // Próximo N(s) esperado pelo recetor (0 ou 1).
 // Fica fora do llReceive porque o llCloseRx também precisa dele.
@@ -110,6 +111,7 @@ int llOpenTx(LinkLayer llParameters)
 {
     global_timeout = llParameters.timeout;
     global_nRetransmissions = llParameters.nRetransmissions;
+    global_baudRate = llParameters.baudRate;
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
@@ -329,16 +331,19 @@ int llSend(const unsigned char *buf, int bufSize)
 
     // 4. Envio e retransmissões (Stop-and-Wait)
     int frame_accepted = 0;
+    int rejCount = 0;
     alarmCount = 0;
 
     unsigned char expected_rr  = (tx_ns == 0) ? 0xAB : 0xAA; // RR1 se N(s)=0, RR0 se N(s)=1
     unsigned char expected_rej = (tx_ns == 0) ? 0x54 : 0x55; // REJ0 se N(s)=0, REJ1 se N(s)=1
 
-    while (alarmCount <= global_nRetransmissions && !frame_accepted) {
+    while (alarmCount <= global_nRetransmissions && rejCount <= 30 && !frame_accepted) {
         writeBytesSerialPort(frame, frame_size);
 
         alarmEnabled = 1;
-        alarm(global_timeout);
+        // O write() só põe a trama na fila: soma-se o tempo que ela demora na linha
+        // (10 bits por byte), senão a baud rates baixas o alarme dispara antes do fim
+        alarm(global_timeout + frame_size * 10 / global_baudRate + 1);
 
         State state = START;
         unsigned char byte;
@@ -375,10 +380,11 @@ int llSend(const unsigned char *buf, int bufSize)
                             if (control_received == expected_rr) {
                                 frame_accepted = 1;
                             } else if (control_received == expected_rej) {
-                                // REJ -> retransmissão imediata (conta como tentativa)
+                                // REJ -> retransmissão imediata (não conta como tentativa;
+                                // o limite de retransmissões aplica-se só aos timeouts)
                                 alarm(0);
                                 alarmEnabled = 0;
-                                alarmCount++;
+                                rejCount++;
                             }
                         }
                         else state = START;
