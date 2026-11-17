@@ -15,9 +15,6 @@
 #include <time.h>
 #include <unistd.h>
 
-// MISC
-#define BUF_SIZE 256
-
 // Print every byte read (compile with -DDEBUG to enable)
 #ifdef DEBUG
 #define DEBUG_PRINT(...) printf(__VA_ARGS__)
@@ -45,8 +42,16 @@
 #define C_SET 0x03
 #define C_UA 0x07
 #define C_DISC 0x0B
+#define C_I0 0x00   // I frame number 0
+#define C_I1 0x80   // I frame number 1
+#define C_RR0 0xAA  // ready to receive I frame 0
+#define C_RR1 0xAB  // ready to receive I frame 1
+#define C_REJ0 0x54 // I frame 0 rejected
+#define C_REJ1 0x55 // I frame 1 rejected
 
 #define ESC 0x7D
+#define ESC_FLAG 0x5E // stuffed FLAG: ESC ESC_FLAG (FLAG ^ 0x20)
+#define ESC_ESC 0x5D  // stuffed ESC: ESC ESC_ESC (ESC ^ 0x20)
 #define MAX_RX_BUF 2048
 
 // alarmEnabled and alarmCount are defined in alarm_sigaction.c
@@ -64,8 +69,12 @@ static int rx_discReceived = 0; // DISC already received by llReceive
 typedef struct {
     struct timespec start;  // time when the connection was opened
     int iFramesSent;        // I frames written (including retransmissions)
-    int retransmissions;    // I frames resent (timeout or REJ)
-    int timeouts;           // alarms triggered
+    int retransmissions;    // I frames resent = retxTimeout + retxRej
+    int retxTimeout;        // I frames resent because the alarm fired
+    int retxRej;            // I frames resent because a REJ arrived
+    int timeouts;           // alarms triggered while waiting for RR/REJ
+    int ctrlRetx;           // SET/DISC frames resent
+    int ctrlTimeouts;       // alarms triggered while waiting for UA/DISC
     int rrSent, rrReceived;
     int rejSent, rejReceived;
     int iFramesReceived;    // new I frames accepted
@@ -91,19 +100,22 @@ static void printStatistics(const char *role)
                      (now.tv_nsec - stats.start.tv_nsec) / 1e9;
 
     printf("\n===== Statistics (%s) =====\n", role);
-    printf("Elapsed time:           %.3f s\n", elapsed);
-    printf("I frames sent:          %d\n", stats.iFramesSent);
-    printf("Retransmissions:        %d\n", stats.retransmissions);
-    printf("Timeouts:               %d\n", stats.timeouts);
-    printf("RR sent/received:       %d / %d\n", stats.rrSent, stats.rrReceived);
-    printf("REJ sent/received:      %d / %d\n", stats.rejSent, stats.rejReceived);
-    printf("I frames received:      %d\n", stats.iFramesReceived);
-    printf("Duplicates discarded:   %d\n", stats.duplicates);
-    printf("Simulated errors:       %d\n", stats.simulatedErrors);
-    printf("Bytes sent:             %ld\n", stats.bytesSent);
-    printf("Bytes received:         %ld\n", stats.bytesReceived);
+    printf("Elapsed time:             %.3f s\n", elapsed);
+    printf("I frames sent:            %d\n", stats.iFramesSent);
+    printf("I frame retransmissions:  %d (timeout: %d, REJ: %d)\n",
+           stats.retransmissions, stats.retxTimeout, stats.retxRej);
+    printf("I frame timeouts:         %d\n", stats.timeouts);
+    printf("SET/DISC retransmissions: %d\n", stats.ctrlRetx);
+    printf("SET/DISC timeouts:        %d\n", stats.ctrlTimeouts);
+    printf("RR sent/received:         %d / %d\n", stats.rrSent, stats.rrReceived);
+    printf("REJ sent/received:        %d / %d\n", stats.rejSent, stats.rejReceived);
+    printf("I frames received:        %d\n", stats.iFramesReceived);
+    printf("Duplicates discarded:     %d\n", stats.duplicates);
+    printf("Simulated errors:         %d\n", stats.simulatedErrors);
+    printf("Bytes sent:               %ld\n", stats.bytesSent);
+    printf("Bytes received:           %ld\n", stats.bytesReceived);
     if (elapsed > 0)
-        printf("Useful bitrate:         %.1f bit/s\n",
+        printf("Useful bitrate:           %.1f bit/s\n",
                8.0 * (stats.bytesSent + stats.bytesReceived) / elapsed);
     printf("============================\n\n");
 }
@@ -214,9 +226,11 @@ int llOpenTx(LinkLayer llParameters)
     setFrame[3] = setFrame[1] ^ setFrame[2]; // BCC1
     setFrame[4] = FLAG;
 
+    int sends = 0;
     while (alarmCount <= llParameters.nRetransmissions && state != STOP_STATE)
     {
         state = START; // restart the state machine on every attempt
+        if (sends++ > 0) stats.ctrlRetx++;
 
         printf("Transmitter: sending SET frame...\n");
         int bytesWritten = writeBytesSerialPort(setFrame, 5);
@@ -264,7 +278,7 @@ int llOpenTx(LinkLayer llParameters)
     }
 
     alarm(0); // disable the pending alarm
-    stats.timeouts += alarmCount;
+    stats.ctrlTimeouts += alarmCount;
 
     if (state != STOP_STATE)
     {
@@ -357,7 +371,7 @@ int llSend(const unsigned char *buf, int bufSize)
     static int tx_ns = 0; // toggles between 0 and 1 after every successful send
 
     // 1. Compute C and BCC1
-    unsigned char c_byte = (tx_ns == 0) ? 0x00 : 0x80;
+    unsigned char c_byte = (tx_ns == 0) ? C_I0 : C_I1;
     unsigned char bcc1 = A_TX ^ c_byte;
 
     // 2. Compute BCC2 (D1 ^ D2 ^ ... ^ Dn) before byte stuffing
@@ -382,10 +396,10 @@ int llSend(const unsigned char *buf, int bufSize)
     for (int i = 0; i < bufSize; i++) {
         if (buf[i] == FLAG) {
             frame[frame_idx++] = ESC;
-            frame[frame_idx++] = 0x5E;
+            frame[frame_idx++] = ESC_FLAG;
         } else if (buf[i] == ESC) {
             frame[frame_idx++] = ESC;
-            frame[frame_idx++] = 0x5D;
+            frame[frame_idx++] = ESC_ESC;
         } else {
             frame[frame_idx++] = buf[i];
         }
@@ -394,10 +408,10 @@ int llSend(const unsigned char *buf, int bufSize)
     // Byte stuffing of BCC2
     if (bcc2 == FLAG) {
         frame[frame_idx++] = ESC;
-        frame[frame_idx++] = 0x5E;
+        frame[frame_idx++] = ESC_FLAG;
     } else if (bcc2 == ESC) {
         frame[frame_idx++] = ESC;
-        frame[frame_idx++] = 0x5D;
+        frame[frame_idx++] = ESC_ESC;
     } else {
         frame[frame_idx++] = bcc2;
     }
@@ -409,18 +423,26 @@ int llSend(const unsigned char *buf, int bufSize)
     int frame_accepted = 0;
     int attempts = 0;
     int rejCount = 0;
+    int lastWasRej = 0; // why the previous attempt ended: REJ (1) or timeout (0)
     alarmCount = 0;
 
-    unsigned char expected_rr  = (tx_ns == 0) ? 0xAB : 0xAA; // RR1 if N(s)=0, RR0 if N(s)=1
-    unsigned char expected_rej = (tx_ns == 0) ? 0x54 : 0x55; // REJ0 if N(s)=0, REJ1 if N(s)=1
+    unsigned char expected_rr  = (tx_ns == 0) ? C_RR1 : C_RR0; // RR1 if N(s)=0, RR0 if N(s)=1
+    unsigned char expected_rej = (tx_ns == 0) ? C_REJ0 : C_REJ1; // REJ0 if N(s)=0, REJ1 if N(s)=1
 
     while (alarmCount <= global_nRetransmissions && rejCount <= 30 && !frame_accepted) {
         writeBytesSerialPort(frame, frame_size);
         stats.iFramesSent++;
-        if (attempts++ > 0) stats.retransmissions++;
+        if (attempts++ > 0) {
+            stats.retransmissions++;
+            if (lastWasRej) stats.retxRej++;
+            else stats.retxTimeout++;
+        }
+        lastWasRej = 0;
 
         alarmEnabled = 1;
-        alarm(global_timeout + frame_size * 10 / global_baudRate + 1); // + time the frame takes on the wire
+        // write() only queues the frame: add the time it takes on the line
+        // (10 bits per byte), otherwise at low baud rates the alarm fires before it ends
+        alarm(global_timeout + frame_size * 10 / global_baudRate + 1);
 
         State state = START;
         unsigned char byte;
@@ -464,6 +486,7 @@ int llSend(const unsigned char *buf, int bufSize)
                                 // the retransmission limit only applies to timeouts)
                                 alarm(0);
                                 alarmEnabled = 0;
+                                lastWasRej = 1;
                             }
                         }
                         else state = START;
@@ -528,8 +551,9 @@ int llReceive(unsigned char *packet)
                         else state = START;
                         break;
                     case A_RCV:
-                        // I(0), I(1) or SET (in case the UA sent by llOpen was lost)
-                        if (byte == 0x00 || byte == 0x80 || byte == C_SET || byte == C_DISC) {
+                        // I(0), I(1), SET (in case the UA sent by llOpen was lost)
+                        // or DISC (the transmitter is closing the connection)
+                        if (byte == C_I0 || byte == C_I1 || byte == C_SET || byte == C_DISC) {
                             c_byte = byte;
                             state = C_RCV;
                         }
@@ -590,7 +614,7 @@ int llReceive(unsigned char *packet)
             calc_bcc2 ^= temp_buffer[i];
         }
 
-        int ns_received = (c_byte == 0x80) ? 1 : 0;
+        int ns_received = (c_byte == C_I1) ? 1 : 0;
         int bcc2_ok = (calc_bcc2 == received_bcc2);
 
         // Simulated processing delay (varies T_prop)
@@ -621,7 +645,7 @@ int llReceive(unsigned char *packet)
                 }
 
                 // RR with the next expected N(r)
-                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? C_RR0 : C_RR1);
                 stats.rrSent++;
                 stats.iFramesReceived++;
                 stats.bytesReceived += data_length;
@@ -630,18 +654,18 @@ int llReceive(unsigned char *packet)
                 return data_length;
             } else {
                 // Duplicate: discard it and ask for the right frame again
-                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? C_RR0 : C_RR1);
                 stats.rrSent++;
                 stats.duplicates++;
             }
         } else { // BCC2 failed
             if (ns_received == rx_nr) {
                 // Expected frame with errors -> REJ
-                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0x54 : 0x55);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? C_REJ0 : C_REJ1);
                 stats.rejSent++;
             } else {
                 // Duplicate with errors -> RR asking for the right frame
-                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? C_RR0 : C_RR1);
                 stats.rrSent++;
                 stats.duplicates++;
             }
@@ -656,11 +680,13 @@ int llCloseTx()
 {
     unsigned char a, c;
     int discReceived = 0;
+    int sends = 0;
     alarmCount = 0;
 
     // 1. Send DISC and wait for the receiver's DISC (with retransmissions)
     while (alarmCount <= global_nRetransmissions && !discReceived)
     {
+        if (sends++ > 0) stats.ctrlRetx++;
         printf("Transmitter: sending DISC frame...\n");
         sendSupervisionFrame(A_TX, C_DISC); // Command from the transmitter -> A = 0x03
 
@@ -676,7 +702,7 @@ int llCloseTx()
     }
 
     alarm(0);
-    stats.timeouts += alarmCount;
+    stats.ctrlTimeouts += alarmCount;
 
     if (!discReceived)
     {
@@ -724,9 +750,9 @@ int llCloseRx()
             if (a == A_TX && c == C_DISC) break;
 
             // Repeated I frame: the last RR was lost, acknowledge it again
-            if (a == A_TX && (c == 0x00 || c == 0x80))
+            if (a == A_TX && (c == C_I0 || c == C_I1))
             {
-                sendSupervisionFrame(A_TX, (rx_nr == 0) ? 0xAA : 0xAB);
+                sendSupervisionFrame(A_TX, (rx_nr == 0) ? C_RR0 : C_RR1);
                 stats.rrSent++;
                 stats.duplicates++;
             }
@@ -739,8 +765,10 @@ int llCloseRx()
     int uaReceived = 0;
     alarmCount = 0;
 
+    int sends = 0;
     while (alarmCount <= global_nRetransmissions && !uaReceived)
     {
+        if (sends++ > 0) stats.ctrlRetx++;
         printf("Receiver: sending DISC frame...\n");
         sendSupervisionFrame(A_RX, C_DISC);
 
@@ -763,7 +791,7 @@ int llCloseRx()
     }
 
     alarm(0);
-    stats.timeouts += alarmCount;
+    stats.ctrlTimeouts += alarmCount;
     closeSerialPort();
 
     if (!uaReceived)
