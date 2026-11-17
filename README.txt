@@ -61,7 +61,11 @@ Protocol Statistics
 -------------------
 
 When the connection is closed, llCloseTx() and llCloseRx() print the protocol statistics:
-I frames sent/received, retransmissions, timeouts, RR/REJ sent/received, duplicates and bytes.
+I frames sent/received, RR/REJ sent/received, duplicates and bytes.
+I frame retransmissions are split by cause (timeout or REJ), so on a successful transfer
+"I frame retransmissions" = "I frame timeouts" + "REJ received". Retransmissions and timeouts
+of SET/DISC (connection setup and termination) are counted separately and are not included
+in the I frame values.
 
 Measuring the Transfer Time
 ---------------------------

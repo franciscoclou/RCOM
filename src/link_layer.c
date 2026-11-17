@@ -45,8 +45,12 @@ static int rx_discReceived = 0; // DISC already received by llReceive
 
 // Protocol statistics, printed by llCloseTx/llCloseRx
 static int statFramesSent = 0;      // I frames written (including retransmissions)
-static int statRetransmissions = 0; // I frames resent (timeout or REJ)
-static int statTimeouts = 0;        // alarms triggered
+static int statRetransmissions = 0; // I frames resent = statRetxTimeout + statRetxRej
+static int statRetxTimeout = 0;     // I frames resent because the alarm fired
+static int statRetxRej = 0;         // I frames resent because a REJ arrived
+static int statTimeouts = 0;        // alarms triggered while waiting for RR/REJ
+static int statCtrlRetx = 0;        // SET/DISC frames resent
+static int statCtrlTimeouts = 0;    // alarms triggered while waiting for UA/DISC
 static int statRrReceived = 0;
 static int statRejReceived = 0;
 static long statBytesSent = 0;      // packet bytes delivered by llSend
@@ -161,9 +165,11 @@ int llOpenTx(LinkLayer llParameters)
     setFrame[3] = setFrame[1] ^ setFrame[2]; // BCC1
     setFrame[4] = FLAG;
 
+    int sends = 0;
     while (alarmCount <= llParameters.nRetransmissions && state != STOP_STATE)
     {
         state = START; // restart the state machine on every attempt
+        if (sends++ > 0) statCtrlRetx++;
 
         printf("Transmitter: sending SET frame...\n");
         int bytesWritten = writeBytesSerialPort(setFrame, 5);
@@ -211,7 +217,7 @@ int llOpenTx(LinkLayer llParameters)
     }
 
     alarm(0); // disable the pending alarm
-    statTimeouts += alarmCount;
+    statCtrlTimeouts += alarmCount;
 
     if (state != STOP_STATE)
     {
@@ -354,6 +360,7 @@ int llSend(const unsigned char *buf, int bufSize)
     int frame_accepted = 0;
     int rejCount = 0;
     int attempts = 0;
+    int lastWasRej = 0; // why the previous attempt ended: REJ (1) or timeout (0)
     alarmCount = 0;
 
     unsigned char expected_rr  = (tx_ns == 0) ? C_RR1 : C_RR0; // RR1 if N(s)=0, RR0 if N(s)=1
@@ -362,7 +369,12 @@ int llSend(const unsigned char *buf, int bufSize)
     while (alarmCount <= global_nRetransmissions && rejCount <= 30 && !frame_accepted) {
         writeBytesSerialPort(frame, frame_size);
         statFramesSent++;
-        if (attempts++ > 0) statRetransmissions++;
+        if (attempts++ > 0) {
+            statRetransmissions++;
+            if (lastWasRej) statRetxRej++;
+            else statRetxTimeout++;
+        }
+        lastWasRej = 0;
 
         alarmEnabled = 1;
         // write() only queues the frame: add the time it takes on the line
@@ -411,6 +423,7 @@ int llSend(const unsigned char *buf, int bufSize)
                                 alarmEnabled = 0;
                                 rejCount++;
                                 statRejReceived++;
+                                lastWasRej = 1;
                             }
                         }
                         else state = START;
@@ -585,11 +598,13 @@ int llCloseTx()
 {
     unsigned char a, c;
     int discReceived = 0;
+    int sends = 0;
     alarmCount = 0;
 
     // 1. Send DISC and wait for the receiver's DISC (with retransmissions)
     while (alarmCount <= global_nRetransmissions && !discReceived)
     {
+        if (sends++ > 0) statCtrlRetx++;
         printf("Transmitter: sending DISC frame...\n");
         sendSupervisionFrame(A_TX, C_DISC); // Command from the transmitter -> A = 0x03
 
@@ -605,15 +620,18 @@ int llCloseTx()
     }
 
     alarm(0);
-    statTimeouts += alarmCount;
+    statCtrlTimeouts += alarmCount;
 
     printf("\n===== Statistics (Transmitter) =====\n");
-    printf("I frames sent:    %d\n", statFramesSent);
-    printf("Retransmissions:  %d\n", statRetransmissions);
-    printf("Timeouts:         %d\n", statTimeouts);
-    printf("RR received:      %d\n", statRrReceived);
-    printf("REJ received:     %d\n", statRejReceived);
-    printf("Bytes sent:       %ld\n", statBytesSent);
+    printf("I frames sent:             %d\n", statFramesSent);
+    printf("I frame retransmissions:   %d (timeout: %d, REJ: %d)\n",
+           statRetransmissions, statRetxTimeout, statRetxRej);
+    printf("I frame timeouts:          %d\n", statTimeouts);
+    printf("RR received:               %d\n", statRrReceived);
+    printf("REJ received:              %d\n", statRejReceived);
+    printf("SET/DISC retransmissions:  %d\n", statCtrlRetx);
+    printf("SET/DISC timeouts:         %d\n", statCtrlTimeouts);
+    printf("Bytes sent:                %ld\n", statBytesSent);
     printf("====================================\n\n");
 
     if (!discReceived)
@@ -675,8 +693,10 @@ int llCloseRx()
     int uaReceived = 0;
     alarmCount = 0;
 
+    int sends = 0;
     while (alarmCount <= global_nRetransmissions && !uaReceived)
     {
+        if (sends++ > 0) statCtrlRetx++;
         printf("Receiver: sending DISC frame...\n");
         sendSupervisionFrame(A_RX, C_DISC);
 
@@ -699,7 +719,7 @@ int llCloseRx()
     }
 
     alarm(0);
-    statTimeouts += alarmCount;
+    statCtrlTimeouts += alarmCount;
     closeSerialPort();
 
     printf("\n===== Statistics (Receiver) =====\n");
@@ -707,7 +727,8 @@ int llCloseRx()
     printf("Duplicates discarded:  %d\n", statDuplicates);
     printf("RR sent:               %d\n", statRrSent);
     printf("REJ sent:              %d\n", statRejSent);
-    printf("Timeouts:              %d\n", statTimeouts);
+    printf("DISC retransmissions:  %d\n", statCtrlRetx);
+    printf("DISC timeouts:         %d\n", statCtrlTimeouts);
     printf("Bytes received:        %ld\n", statBytesReceived);
     printf("=================================\n\n");
 
